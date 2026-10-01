@@ -7,8 +7,8 @@ final class QuickAccessCenter {
     private var panels: [QuickAccessPanel] = []
     var onEdit: ((NSImage, URL) -> Void)?
 
-    func show(image: NSImage, fileURL: URL) {
-        let panel = QuickAccessPanel(image: image, fileURL: fileURL)
+    func show(image: NSImage, fileURL: URL, animated: Bool = false) {
+        let panel = QuickAccessPanel(image: image, fileURL: fileURL, animated: animated)
         panel.onClose = { [weak self, weak panel] in
             guard let self, let panel else { return }
             self.panels.removeAll { $0 === panel }
@@ -38,11 +38,11 @@ private final class QuickAccessPanel: NSPanel {
     private var dismissTimer: Timer?
     private let thumb: ThumbnailView
 
-    init(image: NSImage, fileURL: URL) {
+    init(image: NSImage, fileURL: URL, animated: Bool) {
         let maxSide: CGFloat = 200
         let ratio = image.size.width / max(image.size.height, 1)
         let size = ratio >= 1 ? NSSize(width: maxSide, height: maxSide / ratio) : NSSize(width: maxSide * ratio, height: maxSide)
-        thumb = ThumbnailView(image: image, fileURL: fileURL, frame: NSRect(origin: .zero, size: size))
+        thumb = ThumbnailView(image: image, fileURL: fileURL, animated: animated, frame: NSRect(origin: .zero, size: size))
         super.init(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
         level = .floating
@@ -73,15 +73,17 @@ private final class QuickAccessPanel: NSPanel {
 private final class ThumbnailView: NSView, NSDraggingSource {
     let image: NSImage
     let fileURL: URL
+    let animated: Bool
     var onClose: (() -> Void)?
     var onEdit: (() -> Void)?
     var onHover: ((Bool) -> Void)?
     private let buttons = NSStackView()
     private var mouseDownPoint: NSPoint?
 
-    init(image: NSImage, fileURL: URL, frame: NSRect) {
+    init(image: NSImage, fileURL: URL, animated: Bool, frame: NSRect) {
         self.image = image
         self.fileURL = fileURL
+        self.animated = animated
         super.init(frame: frame)
         wantsLayer = true
         layer?.cornerRadius = 8
@@ -99,8 +101,10 @@ private final class ThumbnailView: NSView, NSDraggingSource {
             buttons.centerXAnchor.constraint(equalTo: centerXAnchor),
             buttons.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-        for (title, action) in [("Copy", #selector(copyImage)), ("Edit", #selector(edit)),
-                                ("Show", #selector(reveal)), ("Close", #selector(close))] {
+        var actions = [("Copy", #selector(copyImage))]
+        if !animated { actions.append(("Edit", #selector(edit))) }
+        actions += [("Show", #selector(reveal)), ("Close", #selector(close))]
+        for (title, action) in actions {
             let b = NSButton(title: title, target: self, action: action)
             b.bezelStyle = .rounded
             b.controlSize = .small
@@ -144,7 +148,14 @@ private final class ThumbnailView: NSView, NSDraggingSource {
 
     @objc private func copyImage() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([image])
+        if animated {
+            NSPasteboard.general.writeObjects([fileURL as NSURL])
+            if let data = try? Data(contentsOf: fileURL) {
+                NSPasteboard.general.setData(data, forType: NSPasteboard.PasteboardType("com.compuserve.gif"))
+            }
+        } else {
+            NSPasteboard.general.writeObjects([image])
+        }
         Toast.show("Copied")
     }
     @objc private func edit() { onEdit?() }

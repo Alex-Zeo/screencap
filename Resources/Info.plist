@@ -12,5 +12,6 @@
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSScreenCaptureUsageDescription</key><string>screencap needs to record your screen to take screenshots and screen recordings.</string>
+    <key>NSAppleEventsUsageDescription</key><string>screencap scrolls your current browser tab to capture the whole page, then restores its position.</string>
 </dict>
 </plist>
