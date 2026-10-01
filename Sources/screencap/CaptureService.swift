@@ -22,10 +22,16 @@ enum CaptureService {
     /// Windows a user can pick, front to back, excluding this app and desktop chrome.
     static func pickableWindows(_ content: SCShareableContent) -> [SCWindow] {
         let me = ProcessInfo.processInfo.processIdentifier
+        let frontToBack = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        let positions = Dictionary(uniqueKeysWithValues: frontToBack.enumerated().compactMap { index, info -> (CGWindowID, Int)? in
+            guard let id = info[kCGWindowNumber as String] as? UInt32 else { return nil }
+            return (id, index)
+        })
         return content.windows.filter {
             $0.windowLayer == 0 && $0.isOnScreen && $0.frame.width > 40 && $0.frame.height > 40
                 && $0.owningApplication?.processID != me
-        }
+        }.sorted { positions[$0.windowID, default: Int.max] < positions[$1.windowID, default: Int.max] }
     }
 
     static func displayID(of screen: NSScreen) -> CGDirectDisplayID? {

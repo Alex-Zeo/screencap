@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ScriptingBridge
 
 /// Capture the current, authenticated page by scrolling its existing browser tab.
 @MainActor
@@ -26,48 +27,68 @@ enum PageCapture {
     }
 
     private struct Browser {
-        let bundle: String
+        let running: NSRunningApplication
+        let application: SBApplication
+        let window: SBObject
+        let tab: SBObject
         let safari: Bool
-        let windowID: Int
-        let tabID: Int
+        let windowID: String
+        let tabID: String
 
         init() throws {
-            guard let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-                  bundle == "com.apple.Safari" || bundle.hasPrefix("com.google.Chrome") else { throw PageError.browser }
-            self.bundle = bundle
+            guard let running = NSWorkspace.shared.frontmostApplication,
+                  let bundle = running.bundleIdentifier,
+                  bundle == "com.apple.Safari" || bundle.hasPrefix("com.google.Chrome"),
+                  let application = SBApplication(processIdentifier: running.processIdentifier),
+                  let windows = application.value(forKey: "windows") as? SBElementArray,
+                  let front = windows.firstObject as? SBObject,
+                  let identifier = front.value(forKey: "id"),
+                  let window = windows.object(withID: identifier) as? SBObject else { throw PageError.browser }
+            self.running = running
+            self.application = application
+            self.window = window
             safari = bundle == "com.apple.Safari"
-            let selection = safari ? """
-                set w to front window
-                set n to 1
-                repeat with i from 1 to count of tabs of w
-                    if current tab of w is tab i of w then set n to i
-                end repeat
-                return ((id of w) as string) & ":" & (n as string)
-                """ : "return ((id of front window) as string) & \":\" & ((id of active tab of front window) as string)"
-            let value = try Self.run("tell application id \"\(bundle)\"\n\(selection)\nend tell")
-            let parts = value.split(separator: ":").compactMap { Int($0) }
-            guard parts.count == 2 else { throw PageError.browser }
-            windowID = parts[0]
-            tabID = parts[1]
+            windowID = String(describing: identifier)
+            guard let current = window.value(forKey: safari ? "currentTab" : "activeTab") as? SBObject,
+                  let tabs = window.value(forKey: "tabs") as? SBElementArray else { throw PageError.browser }
+            if safari {
+                guard let index = current.value(forKey: "index") as? NSNumber,
+                      index.intValue > 0, index.intValue <= tabs.count,
+                      let selected = tabs.object(at: index.intValue - 1) as? SBObject else { throw PageError.browser }
+                tabID = index.stringValue
+                tab = selected
+            } else {
+                guard let id = current.value(forKey: "id"),
+                      let selected = tabs.object(withID: id) as? SBObject else { throw PageError.browser }
+                tabID = String(describing: id)
+                tab = selected
+            }
         }
 
         func javascript(_ code: String, requireActive: Bool = true) throws -> String {
-            // Quote as an AppleScript string, never interpolate page-controlled text into code.
-            let quoted = "\"" + code.replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"") + "\""
-            let target = safari ? "tab \(tabID) of w" : "tab id \(tabID) of w"
-            let check = requireActive ? "if id of front window is not \(windowID) then error \"Window changed\"\n" +
-                (safari ? "if current tab of w is not \(target) then error \"Tab changed\""
-                : "if id of active tab of w is not \(tabID) then error \"Tab changed\"") : ""
-            let command = safari ? "do JavaScript \(quoted) in \(target)" : "execute \(target) javascript \(quoted)"
-            return try Self.run("tell application id \"\(bundle)\"\nset w to window id \(windowID)\n\(check)\nreturn \(command)\nend tell")
-        }
-
-        private static func run(_ source: String) throws -> String {
-            guard let script = NSAppleScript(source: source) else { throw PageError.automation }
-            var error: NSDictionary?
-            let result = script.executeAndReturnError(&error)
-            guard error == nil, let value = result.stringValue else { throw PageError.automation }
+            guard !running.isTerminated else { throw PageError.changed }
+            if requireActive {
+                guard NSWorkspace.shared.frontmostApplication == running,
+                      let windows = application.value(forKey: "windows") as? SBElementArray,
+                      let front = windows.firstObject as? SBObject,
+                      let id = front.value(forKey: "id"), String(describing: id) == windowID,
+                      let current = window.value(forKey: safari ? "currentTab" : "activeTab") as? SBObject,
+                      let currentID = current.value(forKey: safari ? "index" : "id"),
+                      String(describing: currentID) == tabID else {
+                    FileHandle.standardError.write(Data("page capture stopped: active browser window or tab changed\n".utf8))
+                    throw PageError.changed
+                }
+            }
+            // ScriptingBridge addresses the captured process, window and tab. A second
+            // browser instance, including a headless one, cannot receive these events.
+            let result = safari
+                ? application.perform(NSSelectorFromString("doJavaScript:in:"), with: code, with: tab)
+                : tab.perform(NSSelectorFromString("executeJavascript:"), with: code)
+            if let error = safari ? application.lastError() : tab.lastError() {
+                FileHandle.standardError.write(Data("browser automation failed: \((error as NSError).code)\n".utf8))
+                throw PageError.automation
+            }
+            guard let value = result?.takeUnretainedValue() as? String else { throw PageError.automation }
             return value
         }
     }
@@ -114,6 +135,7 @@ enum PageCapture {
                 })()
                 """)
             guard let data = result.data(using: .utf8), let value = try? JSONDecoder().decode(Metrics.self, from: data) else {
+                FileHandle.standardError.write(Data("page capture stopped: page metrics unavailable\n".utf8))
                 throw PageError.changed
             }
             return value
@@ -143,13 +165,19 @@ enum PageCapture {
             var left: Double = 0
             while left < initial.width {
                 try Task.checkCancellation()
-                guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == browser.bundle else { throw PageError.changed }
+                guard NSWorkspace.shared.frontmostApplication == browser.running else {
+                    FileHandle.standardError.write(Data("page capture stopped: browser lost focus\n".utf8))
+                    throw PageError.changed
+                }
                 _ = try browser.javascript("window.scrollTo({left:\(left),top:\(top),behavior:'instant'});'scrolled'")
                 try await Task.sleep(nanoseconds: 350_000_000)
                 let current = try metrics()
                 guard current.width == initial.width, current.height == initial.height,
                       current.innerWidth == initial.innerWidth, current.innerHeight == initial.innerHeight,
-                      current.screenX == initial.screenX, current.screenY == initial.screenY else { throw PageError.changed }
+                      current.screenX == initial.screenX, current.screenY == initial.screenY else {
+                    FileHandle.standardError.write(Data("page capture stopped: page or viewport geometry changed\n".utf8))
+                    throw PageError.changed
+                }
                 let image = try await CaptureService.captureArea(region, on: screen)
                 guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { throw PageError.changed }
                 // At the last tile the browser clamps scrolling. Draw only the previously uncovered strip.
