@@ -33,7 +33,8 @@ final class SelectionController {
             let win = OverlayWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false, screen: screen)
             win.level = .screenSaver
             win.isOpaque = false
-            win.backgroundColor = .clear
+            // Fully transparent pixels pass clicks to the window below the picker.
+            win.backgroundColor = NSColor.black.withAlphaComponent(0.01)
             win.hasShadow = false
             win.acceptsMouseMovedEvents = true
             win.isReleasedWhenClosed = false
@@ -155,6 +156,7 @@ private final class SelectionView: NSView {
     override func mouseUp(with event: NSEvent) {
         switch mode {
         case .area:
+            dragCurrent = convert(event.locationInWindow, from: nil)
             guard let rect = selectionRect, rect.width > 3, rect.height > 3 else {
                 onFinish?(nil)
                 return
@@ -162,6 +164,7 @@ private final class SelectionView: NSView {
             let global = rect.offsetBy(dx: screen.frame.minX, dy: screen.frame.minY)
             onFinish?(.area(global, screen))
         case .window:
+            hovered = windows.first { $0.frame.contains(globalPoint(event)) }
             if let h = hovered { onFinish?(.window(h.window)) } else { onFinish?(nil) }
         }
     }
