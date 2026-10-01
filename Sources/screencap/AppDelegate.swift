@@ -10,6 +10,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menu: NSMenu!
     private var copyItem: NSMenuItem!
     private var saveItem: NSMenuItem!
+    private var gifOutput: URL?
+    private var gifLimit: Task<Void, Never>?
+    private var isExportingGIF = false
+    private var pageTask: Task<Void, Never>?
+    private lazy var captureGesture = CaptureGesture { [weak self] action in
+        guard let self else { return }
+        switch action {
+        case .area: self.captureArea()
+        case .page: self.capturePage()
+        case .gif: self.recordAreaGIF()
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -18,12 +30,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ensureScreenRecordingAccess()
 
         QuickAccessCenter.shared.onEdit = { image, url in AnnotatorWindowController.present(image: image, fileURL: url) }
-        recorder.onFinish = { [weak self] url in
-            self?.setRecordingUI(false)
-            Toast.show("Saved \(url.lastPathComponent)")
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-        }
+        recorder.onFinish = { [weak self] url in self?.recordingFinished(url) }
         recorder.onError = { [weak self] error in
+            self?.gifLimit?.cancel()
+            self?.gifLimit = nil
+            self?.gifOutput = nil
             self?.setRecordingUI(false)
             Toast.show("Recording failed: \(error.localizedDescription)")
         }
@@ -34,13 +45,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildStatusMenu() {
         statusItem.button?.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "screencap")
         menu = NSMenu()
-        addItem("Capture Area", key: "⌃⇧4", #selector(captureArea))
+        addItem("Capture Area", key: "⌘⇧4 · 1 tap", #selector(captureArea))
+        addItem("Capture Whole Page", key: "⌘⇧4 · 2 taps", #selector(capturePage))
         addItem("Capture Window", key: "⌃⇧5", #selector(captureWindow))
         addItem("Capture Screen", key: "⌃⇧3", #selector(captureScreen))
         addItem("Capture Text (OCR)", key: "⌃⇧7", #selector(captureText))
         menu.addItem(.separator())
         addItem("Record Area", key: "⌃⇧6", #selector(recordArea))
         addItem("Record Screen", key: "⌃⇧8", #selector(recordScreen))
+        addItem("Record Area as GIF", key: "⌘⇧4 · 3 taps", #selector(recordAreaGIF))
         menu.addItem(.separator())
         copyItem = addItem("Copy to Clipboard", #selector(toggleCopy))
         saveItem = addItem("Save to Disk", #selector(toggleSave))
@@ -84,6 +97,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func registerHotKeys() {
         let mods = controlKey | shiftKey
         let keys = HotKeys.shared
+        if !keys.register(keyCode: kVK_ANSI_4, modifiers: cmdKey | shiftKey, requireLeftShift: true,
+                          handler: { [weak self] in self?.captureShortcut() }) {
+            Toast.show("⌘⇧4 is used by another app. Change its shortcut or quit it.")
+        }
         keys.register(keyCode: kVK_ANSI_3, modifiers: mods) { [weak self] in self?.captureScreen() }
         keys.register(keyCode: kVK_ANSI_4, modifiers: mods) { [weak self] in self?.captureArea() }
         keys.register(keyCode: kVK_ANSI_5, modifiers: mods) { [weak self] in self?.captureWindow() }
@@ -99,6 +116,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: Screenshot actions
+
+    private func captureShortcut() {
+        if let pageTask {
+            pageTask.cancel()
+        } else if recorder.isRecording {
+            captureGesture.cancel()
+            stopRecording()
+        } else if recorder.isBusy || isExportingGIF {
+            Toast.show("Finishing the recording")
+        } else {
+            captureGesture.tap()
+        }
+    }
+
+    @objc private func capturePage() {
+        guard pageTask == nil, !recorder.isBusy, !isExportingGIF else { return }
+        pageTask = Task { @MainActor in
+            defer { pageTask = nil }
+            do { deliver(try await PageCapture.capture()) }
+            catch is CancellationError { Toast.show("Page capture cancelled") }
+            catch { report(error) }
+        }
+    }
 
     @objc private func captureArea() {
         pickArea { [weak self] rect, screen in
@@ -187,6 +227,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func recordAreaGIF() {
+        if recorder.isRecording { return stopRecording() }
+        guard !recorder.isBusy, !isExportingGIF else { return }
+        pickArea { [weak self] rect, screen in
+            let local = CGRect(x: rect.minX - screen.frame.minX, y: screen.frame.height - (rect.maxY - screen.frame.minY),
+                               width: rect.width, height: rect.height)
+            try await self?.startRecording(screen: screen, sourceRect: local, gif: true)
+        }
+    }
+
     @objc private func recordScreen() {
         if recorder.isRecording { return stopRecording() }
         let screen = screenUnderCursor()
@@ -195,12 +245,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func startRecording(screen: NSScreen, sourceRect: CGRect?) async throws {
+    private func startRecording(screen: NSScreen, sourceRect: CGRect?, gif: Bool = false) async throws {
+        guard !recorder.isBusy, !isExportingGIF else { return }
         let dir = Settings.saveDirectory
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent(Settings.timestampedName(prefix: "Recording", ext: "mp4"))
-        try await recorder.start(screen: screen, sourceRect: sourceRect, to: url)
+        let url = gif ? FileManager.default.temporaryDirectory.appendingPathComponent("screencap-\(UUID().uuidString).mp4")
+                      : dir.appendingPathComponent(Settings.timestampedName(prefix: "Recording", ext: "mp4"))
+        gifOutput = gif ? dir.appendingPathComponent(Settings.timestampedName(prefix: "Recording", ext: "gif")) : nil
+        do { try await recorder.start(screen: screen, sourceRect: sourceRect, to: url) }
+        catch { gifOutput = nil; throw error }
         setRecordingUI(true)
+        if gif {
+            gifLimit = Task { @MainActor [weak self] in
+                do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
+                self?.stopRecording()
+            }
+        }
+    }
+
+    private func recordingFinished(_ video: URL) {
+        gifLimit?.cancel()
+        gifLimit = nil
+        setRecordingUI(false)
+        guard let output = gifOutput else {
+            Toast.show("Saved \(video.lastPathComponent)")
+            NSWorkspace.shared.activateFileViewerSelecting([video])
+            return
+        }
+        gifOutput = nil
+        isExportingGIF = true
+        Toast.show("Creating GIF")
+        Task { @MainActor in
+            defer { isExportingGIF = false }
+            do {
+                try await GIFExporter.export(video, to: output)
+                guard let image = NSImage(contentsOf: output) else { throw GIFExporter.ExportError.cannotFinish }
+                try? FileManager.default.removeItem(at: video)
+                QuickAccessCenter.shared.show(image: image, fileURL: output, animated: true)
+                Toast.show("Saved \(output.lastPathComponent)")
+            } catch {
+                Toast.show("GIF export failed. The video is available in Finder.")
+                NSWorkspace.shared.activateFileViewerSelecting([video])
+                FileHandle.standardError.write(Data("GIF export failed: \(error)\n".utf8))
+            }
+        }
     }
 
     @objc private func stopRecording() {

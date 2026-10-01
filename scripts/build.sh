@@ -26,6 +26,15 @@ swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos15.0" \
   Sources/screencap/*.swift -o "$APP/Contents/MacOS/screencap"
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
-# A stable ad-hoc identity keeps the Screen Recording grant across rebuilds better than an unsigned binary.
-codesign --force --sign - --identifier com.alexzeo.screencap "$APP"
+# TCC stores the designated requirement. Ad-hoc requirements contain a changing
+# cdhash; a Developer ID requirement keeps the same app/team identity across builds.
+signing_identity="${CODESIGN_IDENTITY:-}"
+if [[ -z "$signing_identity" ]]; then
+  signing_identity=$(security find-identity -v -p codesigning | awk '/"Developer ID Application:/ {print $2; exit}')
+fi
+if [[ -z "$signing_identity" ]]; then
+  signing_identity=-
+  echo "warning: no Developer ID identity found; ad-hoc rebuilds require fresh privacy grants" >&2
+fi
+codesign --force --sign "$signing_identity" --timestamp=none --identifier com.alexzeo.screencap "$APP"
 echo "built $APP"

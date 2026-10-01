@@ -29,7 +29,7 @@ enum Settings {
 
     static func timestampedName(prefix: String, ext: String) -> String {
         let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        return "\(prefix) \(f.string(from: Date())).\(ext)"
+        f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss.SSS"
+        return "\(prefix) \(f.string(from: Date()))-\(UUID().uuidString.prefix(8)).\(ext)"
     }
 }
