@@ -41,6 +41,8 @@ open build/screencap.app
 
 Grant **Screen Recording** permission when prompted (System Settings > Privacy & Security > Screen & System Audio Recording), then relaunch.
 
+The build script uses an available Developer ID Application identity, or the identity specified by `CODESIGN_IDENTITY`. Keep the same signing identity and install path across updates so macOS privacy grants persist. Without a Developer ID identity, the script warns and falls back to ad-hoc signing. Each changed ad-hoc binary has a new designated requirement, so Screen Recording and browser-control grants may need to be renewed. Switching from an ad-hoc build to a Developer ID build also needs one fresh grant. A fixed bundle identifier alone does not preserve permissions.
+
 If the build fails with `redefinition of module 'SwiftBridging'`, your Command Line Tools have a stale duplicate modulemap. Reinstalling the CLT fixes it permanently. To build without sudo:
 
 ```sh
@@ -51,12 +53,16 @@ CLT_MODULEMAP_WORKAROUND=1 ./scripts/build.sh
 
 ## Status
 
-Early (0.1.0). The original build was checked with real screenshots, OCR, MP4 recording, and annotation save/undo. The new gesture, page capture, GIF export, and picker fix still require a macOS build and end-to-end checks. Not yet done:
+Early (0.1.0). Real macOS checks cover the single/double/triple shortcut, right-Shift rejection, held-key repeat suppression, screenshot and animated GIF file drops, GIF clipboard data, window picking, Chrome scrolling capture and cancellation with scroll/style restoration. Gesture sequence assertions pass. The original capture, OCR, MP4 recording and annotation save/undo paths have also been exercised.
+
+Developer ID signing was checked against the approved Screen Recording requirement across different binaries, then verified with live captures after updating the installed app. Safari's native browser bridge is implemented; live scrolling checks were performed in Chrome.
+
+Not yet done:
 
 - Scrolling capture in Firefox and nested panels
 - Configurable hotkeys and save location UI
 - Pin-to-screen and self-timer
-- Automated tests
+- Broader automated UI test coverage
 
 ## License
 
