@@ -278,7 +278,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             defer { isExportingGIF = false }
             do {
-                let image = try await GIFExporter.export(video, to: output)
+                try await GIFExporter.export(video, to: output)
+                guard let image = NSImage(contentsOf: output) else { throw GIFExporter.ExportError.cannotFinish }
                 try? FileManager.default.removeItem(at: video)
                 QuickAccessCenter.shared.show(image: image, fileURL: output, animated: true)
                 Toast.show("Saved \(output.lastPathComponent)")

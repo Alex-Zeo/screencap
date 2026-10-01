@@ -48,11 +48,16 @@ final class HotKeys {
                               nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
             let id = hotKeyID.id
             let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
-            let leftShift = CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(kVK_Shift))
-            let rightShift = CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(kVK_RightShift))
-            DispatchQueue.main.async { HotKeys.shared.receive(id: id, pressed: pressed, leftShift: leftShift && !rightShift) }
+            // NX_DEVICELSHIFTKEYMASK and NX_DEVICERSHIFTKEYMASK retain the side.
+            // Combined keyState can normalize an injected right Shift to left Shift.
+            let shiftSides = CGEventSource.flagsState(.combinedSessionState).rawValue & 0x6
+            let leftShiftOnly = shiftSides == 0
+                ? CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(kVK_Shift))
+                    && !CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(kVK_RightShift))
+                : shiftSides == 0x2
+            DispatchQueue.main.async { HotKeys.shared.receive(id: id, pressed: pressed, leftShift: leftShiftOnly) }
             return noErr
-        }, UInt32(specs.count), &specs, nil, nil)
+        }, specs.count, &specs, nil, nil)
     }
 
     private func receive(id: UInt32, pressed: Bool, leftShift: Bool) {

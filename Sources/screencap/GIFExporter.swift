@@ -1,4 +1,3 @@
-import AppKit
 import AVFoundation
 import Foundation
 import ImageIO
@@ -18,10 +17,10 @@ enum GIFExporter {
     }
 
     /// Decode one frame at a time off the main actor. Bound size and frame rate for useful GIFs.
-    static func export(_ video: URL, to output: URL) async throws -> NSImage {
+    static func export(_ video: URL, to output: URL) async throws {
         let duration = try await AVURLAsset(url: video).load(.duration).seconds
         guard duration.isFinite, duration > 0, duration <= 35 else { throw ExportError.emptyRecording }
-        return try await Task.detached(priority: .userInitiated) {
+        try await Task.detached(priority: .userInitiated) {
             let frameCount = max(2, Int(ceil(duration * 15)))
             let delay = duration / Double(frameCount)
             let partial = output.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).gif")
@@ -46,8 +45,6 @@ enum GIFExporter {
             }
             guard CGImageDestinationFinalize(destination) else { throw ExportError.cannotFinish }
             try FileManager.default.moveItem(at: partial, to: output)
-            guard let image = NSImage(contentsOf: output) else { throw ExportError.cannotFinish }
-            return image
         }.value
     }
 }
